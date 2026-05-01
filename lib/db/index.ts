@@ -1,4 +1,4 @@
-import { Pool } from '@neondatabase/serverless';
+import { Pool } from 'pg';
 
 // Check if we're in a browser environment
 const isBrowser = typeof window !== 'undefined';
@@ -16,24 +16,36 @@ const mockPool = {
   end: async () => {},
 };
 
-// Only create real pool on server
-export const pool = !isBrowser
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 3,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000, // Reduced timeout
-    })
-  : mockPool;
+// Global type fix (avoids multiple pool creation in dev)
+const globalForPool = globalThis as unknown as {
+  pool: Pool | undefined;
+};
 
-// For development, log when pool is created (only on server)
+// Only create real pool on server
+export const pool: Pool | typeof mockPool =
+  !isBrowser
+    ? globalForPool.pool ??
+      new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 3,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+      })
+    : mockPool;
+
+// Save pool globally in development
+if (!isBrowser && process.env.NODE_ENV !== 'production') {
+  globalForPool.pool = pool as Pool;
+}
+
+// For development logging
 if (!isBrowser && process.env.NODE_ENV === 'development') {
   console.log('📦 Database pool created');
 }
 
-// Handle pool errors gracefully
+// Handle pool errors (ONLY for real pool)
 if (!isBrowser) {
-  pool.on('error', (err) => {
+  (pool as Pool).on('error', (err: Error) => {
     console.error('Unexpected error on idle client', err);
   });
 }
