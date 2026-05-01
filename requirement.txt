@@ -1,0 +1,69 @@
+# Project Setup Requirements & Instructions
+
+Follow these instructions to set up and run the Social Media Platform 
+
+## 1. System Requirements
+- **Node.js**: v18.17.0 or higher
+- **npm** (comes with Node.js) or **pnpm** / **yarn**
+- **Git**
+
+## 2. Installation Steps
+
+1. **Clone the repository** (if not already done):
+   ```bash
+   git clone <your-repository-url>
+   cd social-media-platform
+   ```
+
+2. **Install Dependencies**:
+   This project uses `npm`. Run the following command in the project root:
+   ```bash
+   npm install
+   ```
+
+## 3. Environment Variables (.env.local)
+
+Create a `.env.local` file in the root directory and configure the following required environment variables:
+
+```env
+# 1. Database Configuration (Neon PostgreSQL)
+DATABASE_URL="postgresql://<user>:<password>@<host>/<dbname>?sslmode=require"
+
+# 2. Next Auth (Authentication)
+NEXTAUTH_URL="http://localhost:3000"
+NEXTAUTH_SECRET="<generate-a-random-secret>"
+
+# 3. Pusher (Real-time updates)
+PUSHER_APP_ID="<your-pusher-app-id>"
+NEXT_PUBLIC_PUSHER_KEY="<your-pusher-key>"
+PUSHER_SECRET="<your-pusher-secret>"
+NEXT_PUBLIC_PUSHER_CLUSTER="<your-pusher-cluster>"
+
+# 4. UploadThing (Media Uploads)
+UPLOADTHING_SECRET="<your-uploadthing-secret>"
+UPLOADTHING_APP_ID="<your-uploadthing-app-id>"
+```
+
+## 4. Database Setup
+
+Once your `.env.local` file is configured with your `DATABASE_URL`:
+
+1. **Generate Prisma Client**:
+   ```bash
+   npx prisma generate
+   ```
+
+2. **Push the schema to the database**:
+   ```bash
+   npx prisma db push
+   ```
+
+## 5. Running the Application
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+The application will be available at [http://localhost:3000](http://localhost:3000).
