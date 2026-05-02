@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth/auth';
-import { pool } from '@/lib/db';
+import { pool } from '@/lib/db';  // This imports from your db.ts file
 
 export async function GET(req: NextRequest) {
   try {
@@ -90,26 +90,23 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: 'Missing fields' }, { status: 400 });
     }
 
-    const client = await pool.connect();
+    // Simple operations - use pool.query directly without transactions
     try {
-      await client.query('BEGIN');
-
       if (action === 'delete') {
-        await client.query('DELETE FROM comments WHERE id = $1', [commentId]);
+        await pool.query('DELETE FROM comments WHERE id = $1', [commentId]);
       } else if (action === 'spam') {
-        await client.query('UPDATE comments SET is_spam = true WHERE id = $1', [commentId]);
+        await pool.query('UPDATE comments SET is_spam = true WHERE id = $1', [commentId]);
       } else if (action === 'not-spam') {
-        await client.query('UPDATE comments SET is_spam = false WHERE id = $1', [commentId]);
+        await pool.query('UPDATE comments SET is_spam = false WHERE id = $1', [commentId]);
       } else if (action === 'approve') {
         // If comment was reported, resolve related reports
-        await client.query('DELETE FROM reports WHERE reported_comment_id = $1', [commentId]);
+        await pool.query('DELETE FROM reports WHERE reported_comment_id = $1', [commentId]);
       } else {
         throw new Error('Invalid action');
       }
 
-      // Log admin action using existing columns only
-      // Store comment ID inside details JSON since there is no target_comment_id column
-      await client.query(
+      // Log admin action
+      await pool.query(
         `INSERT INTO admin_logs (admin_id, action, target_user_id, target_post_id, details)
          VALUES ($1, $2, NULL, NULL, $3)`,
         [
@@ -119,13 +116,10 @@ export async function PATCH(req: NextRequest) {
         ]
       );
 
-      await client.query('COMMIT');
       return NextResponse.json({ success: true });
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      console.error('Database error:', error);
+      return NextResponse.json({ error: 'Database operation failed' }, { status: 500 });
     }
   } catch (error) {
     console.error('Error updating comment:', error);
