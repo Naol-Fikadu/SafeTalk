@@ -1,145 +1,251 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth/auth';
-import { pool } from '@/lib/db';
+import { Pool, PoolClient } from 'pg';
 
-export async function GET(req: NextRequest) {
+// Database connection pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+export async function POST(request: NextRequest) {
+  let client: PoolClient | null = null;
+  
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.is_admin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const body = await request.json();
+    const { targetUserId, message, type } = body;
+
+    // Validate required fields
+    if (!message || !type) {
+      return NextResponse.json(
+        { error: 'Message and type are required' },
+        { status: 400 }
+      );
     }
 
-    const { searchParams } = new URL(req.url);
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '20');
-    const search = searchParams.get('search') || '';
-    const type = searchParams.get('type') || 'all'; // e.g., 'admin', 'system', 'all'
-    const offset = (page - 1) * limit;
+    // Connect to database
+    client = await pool.connect();
 
-    // Build WHERE conditions
-    const conditions: string[] = [];
-    const params: any[] = [];
-
-    if (search) {
-      conditions.push(`(n.content ILIKE $${params.length + 1} OR u.username ILIKE $${params.length + 1})`);
-      params.push(`%${search}%`);
+    if (targetUserId) {
+      // Send notification to a single user
+      await client.query(
+        `INSERT INTO notifications (user_id, message, type, created_at, is_read)
+         VALUES ($1, $2, $3, NOW(), false)
+         RETURNING *`,
+        [targetUserId, message, type]
+      );
+    } else {
+      // Send notification to all users (admin broadcast)
+      await client.query(
+        `INSERT INTO notifications (user_id, message, type, created_at, is_read)
+         SELECT id, $1, $2, NOW(), false
+         FROM users`,
+        [message, type]
+      );
     }
 
-    if (type !== 'all') {
-      conditions.push(`n.type = $${params.length + 1}`);
-      params.push(type);
-    }
-
-    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    // Total count
-    const countResult = await pool.query(
-      `SELECT COUNT(*) as total FROM notifications n
-       LEFT JOIN users u ON n.user_id = u.id
-       ${whereClause}`,
-      params
+    return NextResponse.json(
+      { success: true, message: 'Notification sent successfully' },
+      { status: 200 }
     );
-    const total = parseInt(countResult.rows[0].total);
 
-    // Notifications list (joined with user who received it, and optionally actor)
-    const query = `
-      SELECT 
-        n.id,
-        n.type,
-        n.content,
-        n.is_read,
-        n.created_at,
-        n.user_id,
-        u.username as recipient_username,
-        u.full_name as recipient_full_name,
-        u.avatar_url as recipient_avatar,
-        actor.id as actor_id,
-        actor.username as actor_username
-      FROM notifications n
-      LEFT JOIN users u ON n.user_id = u.id
-      LEFT JOIN users actor ON n.actor_id = actor.id
-      ${whereClause}
-      ORDER BY n.created_at DESC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `;
-    params.push(limit, offset);
-    const result = await pool.query(query, params);
-
-    return NextResponse.json({
-      notifications: result.rows,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
-    });
   } catch (error) {
-    console.error('Error fetching notifications:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    console.error('Error sending notification:', error);
+    return NextResponse.json(
+      { error: 'Failed to send notification' },
+      { status: 500 }
+    );
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function GET(request: NextRequest) {
+  let client: PoolClient | null = null;
+  
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.is_admin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+    const { searchParams } = new URL(request.url);
+    const userId = searchParams.get('userId');
+    const limit = parseInt(searchParams.get('limit') || '50');
+    const offset = parseInt(searchParams.get('offset') || '0');
 
-    const body = await req.json();
-    const { content, type = 'admin', targetUserId } = body;
-
-    if (!content) {
-      return NextResponse.json({ error: 'Content is required' }, { status: 400 });
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      if (targetUserId) {
-        // Send to a single user
-        await client.query(
-          `INSERT INTO notifications (user_id, type, actor_id, content)
-           VALUES ($1, $2, $3, $4)`,
-          [targetUserId, type, session.user.id, content]
-        );
-      } else {
-        // Broadcast to all users (except the admin)
-        const usersResult = await client.query(
-          `SELECT id FROM users WHERE id != $1`,
-          [session.user.id]
-        );
-        const userIds = usersResult.rows.map(row => row.id);
-
-        for (const userId of userIds) {
-          await client.query(
-            `INSERT INTO notifications (user_id, type, actor_id, content)
-             VALUES ($1, $2, $3, $4)`,
-            [userId, type, session.user.id, content]
-          );
-        }
-      }
-
-      // Log action
-      await client.query(
-        `INSERT INTO admin_logs (admin_id, action, details)
-         VALUES ($1, 'send_notification', $2)`,
-        [session.user.id, JSON.stringify({ content, type, targetUserId })]
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'User ID is required' },
+        { status: 400 }
       );
+    }
 
-      await client.query('COMMIT');
-      return NextResponse.json({ success: true }, { status: 201 });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
+    client = await pool.connect();
+
+    // Get notifications for specific user
+    const result = await client.query(
+      `SELECT id, message, type, is_read, created_at
+       FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [userId, limit, offset]
+    );
+
+    // Get unread count
+    const countResult = await client.query(
+      `SELECT COUNT(*) as unread_count
+       FROM notifications
+       WHERE user_id = $1 AND is_read = false`,
+      [userId]
+    );
+
+    return NextResponse.json({
+      notifications: result.rows,
+      unreadCount: parseInt(countResult.rows[0]?.unread_count || '0'),
+      pagination: {
+        limit,
+        offset,
+        total: result.rowCount
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch notifications' },
+      { status: 500 }
+    );
+  } finally {
+    if (client) {
       client.release();
     }
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  let client: PoolClient | null = null;
+  
+  try {
+    const body = await request.json();
+    const { notificationId, userId, markAllAsRead } = body;
+
+    client = await pool.connect();
+
+    if (markAllAsRead && userId) {
+      // Mark all notifications as read for a user
+      await client.query(
+        `UPDATE notifications
+         SET is_read = true
+         WHERE user_id = $1 AND is_read = false`,
+        [userId]
+      );
+      
+      return NextResponse.json(
+        { success: true, message: 'All notifications marked as read' },
+        { status: 200 }
+      );
+    } else if (notificationId) {
+      // Mark single notification as read
+      const result = await client.query(
+        `UPDATE notifications
+         SET is_read = true
+         WHERE id = $1
+         RETURNING *`,
+        [notificationId]
+      );
+
+      if (result.rows.length === 0) {
+        return NextResponse.json(
+          { error: 'Notification not found' },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        notification: result.rows[0]
+      });
+    } else {
+      return NextResponse.json(
+        { error: 'Notification ID or userId with markAllAsRead is required' },
+        { status: 400 }
+      );
+    }
+
   } catch (error) {
-    console.error('Error creating notification:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    console.error('Error updating notification:', error);
+    return NextResponse.json(
+      { error: 'Failed to update notification' },
+      { status: 500 }
+    );
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  let client: PoolClient | null = null;
+  
+  try {
+    const { searchParams } = new URL(request.url);
+    const notificationId = searchParams.get('id');
+    const userId = searchParams.get('userId');
+    const deleteAll = searchParams.get('deleteAll') === 'true';
+
+    if (!notificationId && !deleteAll) {
+      return NextResponse.json(
+        { error: 'Notification ID is required or use deleteAll=true' },
+        { status: 400 }
+      );
+    }
+
+    client = await pool.connect();
+
+    if (deleteAll && userId) {
+      // Delete all notifications for a user
+      await client.query(
+        'DELETE FROM notifications WHERE user_id = $1',
+        [userId]
+      );
+      
+      return NextResponse.json(
+        { success: true, message: 'All notifications deleted' },
+        { status: 200 }
+      );
+    } else if (notificationId) {
+      // Delete single notification
+      const result = await client.query(
+        'DELETE FROM notifications WHERE id = $1 RETURNING id',
+        [notificationId]
+      );
+
+      if (result.rows.length === 0) {
+        return NextResponse.json(
+          { error: 'Notification not found' },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json(
+        { success: true, message: 'Notification deleted successfully' },
+        { status: 200 }
+      );
+    } else {
+      return NextResponse.json(
+        { error: 'User ID is required to delete all notifications' },
+        { status: 400 }
+      );
+    }
+
+  } catch (error) {
+    console.error('Error deleting notification:', error);
+    return NextResponse.json(
+      { error: 'Failed to delete notification' },
+      { status: 500 }
+    );
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }
